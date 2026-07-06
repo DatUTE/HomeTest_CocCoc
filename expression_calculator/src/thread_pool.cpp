@@ -7,19 +7,19 @@ namespace expression_calculator {
 
 ThreadPool::ThreadPool(size_t workerCount) {
     workerCount = std::max<size_t>(1, workerCount);
-    workers_.reserve(workerCount);
+    m_workers.reserve(workerCount);
     for (size_t i = 0; i < workerCount; ++i) {
-        workers_.emplace_back([this] { workerLoop(); });
+        m_workers.emplace_back([this] { workerLoop(); });
     }
 }
 
 ThreadPool::~ThreadPool() {
     {
-        std::lock_guard<std::mutex> lock(mutex_);
-        stopping_ = true;
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_stopping = true;
     }
-    cv_.notify_all();
-    for (std::thread& worker : workers_) {
+    m_cv.notify_all();
+    for (std::thread& worker : m_workers) {
         if (worker.joinable()) {
             worker.join();
         }
@@ -28,31 +28,31 @@ ThreadPool::~ThreadPool() {
 
 void ThreadPool::submit(std::function<void()> job) {
     {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (stopping_) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_stopping) {
             throw std::runtime_error("thread pool is stopping");
         }
-        jobs_.push(std::move(job));
+        m_jobs.push(std::move(job));
     }
-    cv_.notify_one();
+    m_cv.notify_one();
 }
 
 size_t ThreadPool::workerCount() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return workers_.size();
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_workers.size();
 }
 
 void ThreadPool::workerLoop() {
     while (true) {
         std::function<void()> job;
         {
-            std::unique_lock<std::mutex> lock(mutex_);
-            cv_.wait(lock, [this] { return stopping_ || !jobs_.empty(); });
-            if (stopping_ && jobs_.empty()) {
+            std::unique_lock<std::mutex> lock(m_mutex);
+            m_cv.wait(lock, [this] { return m_stopping || !m_jobs.empty(); });
+            if (m_stopping && m_jobs.empty()) {
                 return;
             }
-            job = std::move(jobs_.front());
-            jobs_.pop();
+            job = std::move(m_jobs.front());
+            m_jobs.pop();
         }
         try {   
             job();

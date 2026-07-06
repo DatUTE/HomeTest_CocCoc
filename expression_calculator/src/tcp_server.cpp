@@ -21,6 +21,8 @@ namespace {
 
 constexpr int kMaxEvents = 1024;
 constexpr size_t kReadBufferSize = 1024 * 1024;
+
+// Pre-size client map for high-concurrency tests.
 constexpr size_t kExpectedConcurrentClients = 16 * 1024;
 
 void closeFd(int& fd) {
@@ -50,42 +52,42 @@ std::string makeResponse(std::string_view expression) {
 } // namespace
 
 TcpServer::TcpServer(std::uint16_t port, size_t workerCount, size_t maxExpressionBytes)
-    : listenFd_(createListenSocket(port)),
-      epollFd_(::epoll_create1(EPOLL_CLOEXEC)),
-      completionEventFd_(::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC)),
-      maxExpressionBytes_(maxExpressionBytes),
-      workers_(workerCount) {
-    if (epollFd_ < 0) {
-        closeFd(listenFd_);
+    : m_listenFd(createListenSocket(port)),
+      m_epollFd(::epoll_create1(EPOLL_CLOEXEC)),
+      m_completionEventFd(::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC)),
+      m_maxExpressionBytes(maxExpressionBytes),
+      m_workers(workerCount) {
+    if (m_epollFd < 0) {
+        closeFd(m_listenFd);
         throw std::runtime_error("epoll_create1 failed: " + std::string(std::strerror(errno)));
     }
-    if (completionEventFd_ < 0) {
-        closeFd(listenFd_);
-        closeFd(epollFd_);
+    if (m_completionEventFd < 0) {
+        closeFd(m_listenFd);
+        closeFd(m_epollFd);
         throw std::runtime_error("eventfd failed: " + std::string(std::strerror(errno)));
     }
 
-    addEpollFd(epollFd_, listenFd_, EPOLLIN);
-    addEpollFd(epollFd_, completionEventFd_, EPOLLIN);
-    clients_.reserve(kExpectedConcurrentClients);
+    addEpollFd(m_epollFd, m_listenFd, EPOLLIN);
+    addEpollFd(m_epollFd, m_completionEventFd, EPOLLIN);
+    m_clients.reserve(kExpectedConcurrentClients);
 }
 
 TcpServer::~TcpServer() {
-    for (auto& [fd, client] : clients_) {
+    for (auto& [fd, client] : m_clients) {
         (void)client;
         ::close(fd);
     }
-    closeFd(completionEventFd_);
-    closeFd(epollFd_);
-    closeFd(listenFd_);
+    closeFd(m_completionEventFd);
+    closeFd(m_epollFd);
+    closeFd(m_listenFd);
 }
 
 void TcpServer::run() {
-    std::cerr << "server is listening; worker threads=" << workers_.workerCount() << "\n";
+    std::cerr << "server is listening; worker threads=" << m_workers.workerCount() << "\n";
 
     std::vector<epoll_event> events(kMaxEvents);
     while (true) {
-        int ready = ::epoll_wait(epollFd_, events.data(), static_cast<int>(events.size()), -1);
+        int ready = ::epoll_wait(m_epollFd, events.data(), static_cast<int>(events.size()), -1);
         if (ready < 0) {
             if (errno == EINTR) {
                 continue;
@@ -97,9 +99,9 @@ void TcpServer::run() {
             int fd = events[i].data.fd;
             uint32_t mask = events[i].events;
 
-            if (fd == listenFd_) {
+            if (fd == m_listenFd) {
                 acceptClients();
-            } else if (fd == completionEventFd_) {
+            } else if (fd == m_completionEventFd) {
                 handleCompletions();
             } else {
                 if (mask & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
@@ -109,7 +111,7 @@ void TcpServer::run() {
                 if (mask & EPOLLIN) {
                     handleClientReadable(fd);
                 }
-                if (clients_.find(fd) != clients_.end() && (mask & EPOLLOUT)) {
+                if (m_clients.find(fd) != m_clients.end() && (mask & EPOLLOUT)) {
                     handleClientWritable(fd);
                 }
             }
@@ -149,7 +151,7 @@ void TcpServer::acceptClients() {
     while (true) {
         sockaddr_in address{};
         socklen_t addressLength = sizeof(address);
-        int fd = ::accept4(listenFd_, reinterpret_cast<sockaddr*>(&address), &addressLength,
+        int fd = ::accept4(m_listenFd, reinterpret_cast<sockaddr*>(&address), &addressLength,
                            SOCK_NONBLOCK | SOCK_CLOEXEC);
         if (fd < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -166,15 +168,15 @@ void TcpServer::acceptClients() {
 
         ClientState client;
         client.fd = fd;
-        client.id = nextClientId_++;
-        addEpollFd(epollFd_, fd, EPOLLIN | EPOLLRDHUP);
-        clients_.emplace(fd, std::move(client));
+        client.id = m_nextClientId++;
+        addEpollFd(m_epollFd, fd, EPOLLIN | EPOLLRDHUP);
+        m_clients.emplace(fd, std::move(client));
     }
 }
 
 void TcpServer::handleClientReadable(int fd) {
-    auto it = clients_.find(fd);
-    if (it == clients_.end()) {
+    auto it = m_clients.find(fd);
+    if (it == m_clients.end()) {
         return;
     }
     ClientState& client = it->second;
@@ -192,7 +194,7 @@ void TcpServer::handleClientReadable(int fd) {
                     break;
                 }
 
-                if (newline > maxExpressionBytes_) {
+                if (newline > m_maxExpressionBytes) {
                     client.output += "ERROR: expression is too large\n";
                     client.closeAfterWrite = true;
                     client.input.clear();
@@ -217,7 +219,7 @@ void TcpServer::handleClientReadable(int fd) {
                 submitNextExpression(client);
             }
 
-            if (client.input.size() > maxExpressionBytes_) {
+            if (client.input.size() > m_maxExpressionBytes) {
                 client.output += "ERROR: expression is too large\n";
                 client.closeAfterWrite = true;
                 client.input.clear();
@@ -241,8 +243,8 @@ void TcpServer::handleClientReadable(int fd) {
 }
 
 void TcpServer::handleClientWritable(int fd) {
-    auto it = clients_.find(fd);
-    if (it == clients_.end()) {
+    auto it = m_clients.find(fd);
+    if (it == m_clients.end()) {
         return;
     }
     ClientState& client = it->second;
@@ -271,7 +273,7 @@ void TcpServer::handleClientWritable(int fd) {
 
 void TcpServer::handleCompletions() {
     uint64_t counter = 0;
-    while (::read(completionEventFd_, &counter, sizeof(counter)) < 0) {
+    while (::read(m_completionEventFd, &counter, sizeof(counter)) < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
             break;
         }
@@ -282,13 +284,13 @@ void TcpServer::handleCompletions() {
 
     std::deque<Completion> completions;
     {
-        std::lock_guard<std::mutex> lock(completionsMutex_);
-        completions.swap(completions_);
+        std::lock_guard<std::mutex> lock(m_completionsMutex);
+        completions.swap(m_completions);
     }
 
     for (Completion& completion : completions) {
-        auto it = clients_.find(completion.fd);
-        if (it == clients_.end() || it->second.id != completion.clientId) {
+        auto it = m_clients.find(completion.fd);
+        if (it == m_clients.end() || it->second.id != completion.clientId) {
             continue;
         }
 
@@ -311,7 +313,7 @@ void TcpServer::submitNextExpression(ClientState& client) {
     std::string expression = std::move(client.pendingExpressions.front());
     client.pendingExpressions.pop_front();
 
-    workers_.submit([this, fd, clientId, expression = std::move(expression)]() mutable {
+    m_workers.submit([this, fd, clientId, expression = std::move(expression)]() mutable {
         queueCompletion({fd, clientId, makeResponse(expression)});
     });
 }
@@ -319,9 +321,9 @@ void TcpServer::submitNextExpression(ClientState& client) {
 void TcpServer::queueCompletion(Completion completion) {
     bool shouldWake = false;
     {
-        std::lock_guard<std::mutex> lock(completionsMutex_);
-        shouldWake = completions_.empty();
-        completions_.push_back(std::move(completion));
+        std::lock_guard<std::mutex> lock(m_completionsMutex);
+        shouldWake = m_completions.empty();
+        m_completions.push_back(std::move(completion));
     }
 
     if (!shouldWake) {
@@ -329,7 +331,7 @@ void TcpServer::queueCompletion(Completion completion) {
     }
 
     uint64_t one = 1;
-    while (::write(completionEventFd_, &one, sizeof(one)) < 0) {
+    while (::write(m_completionEventFd, &one, sizeof(one)) < 0) {
         if (errno == EINTR) {
             continue;
         }
@@ -347,19 +349,19 @@ void TcpServer::updateClientEvents(const ClientState& client) {
         event.events |= EPOLLOUT;
     }
     event.data.fd = client.fd;
-    if (::epoll_ctl(epollFd_, EPOLL_CTL_MOD, client.fd, &event) < 0 && errno != EBADF) {
+    if (::epoll_ctl(m_epollFd, EPOLL_CTL_MOD, client.fd, &event) < 0 && errno != EBADF) {
         throw std::runtime_error("epoll_ctl MOD failed: " + std::string(std::strerror(errno)));
     }
 }
 
 void TcpServer::closeClient(int fd) {
-    auto it = clients_.find(fd);
-    if (it == clients_.end()) {
+    auto it = m_clients.find(fd);
+    if (it == m_clients.end()) {
         return;
     }
-    ::epoll_ctl(epollFd_, EPOLL_CTL_DEL, fd, nullptr);
+    ::epoll_ctl(m_epollFd, EPOLL_CTL_DEL, fd, nullptr);
     ::close(fd);
-    clients_.erase(it);
+    m_clients.erase(it);
 }
 
 } // namespace expression_calculator

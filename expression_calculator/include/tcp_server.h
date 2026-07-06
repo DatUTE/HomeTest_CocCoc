@@ -120,16 +120,16 @@ private:
      */
     void closeClient(int fd);
 
-    int listenFd_ = -1;
-    int epollFd_ = -1;
-    int completionEventFd_ = -1;
-    size_t maxExpressionBytes_ = 0;
-    ThreadPool workers_;
-    std::uint64_t nextClientId_ = 1;
-    std::unordered_map<int, ClientState> clients_;
+    int m_listenFd = -1;
+    int m_epollFd = -1;
+    int m_completionEventFd = -1;
+    size_t m_maxExpressionBytes = 0;
+    ThreadPool m_workers;
+    std::uint64_t m_nextClientId = 1;
+    std::unordered_map<int, ClientState> m_clients;
 
-    std::mutex completionsMutex_;
-    std::deque<Completion> completions_;
+    std::mutex m_completionsMutex;
+    std::deque<Completion> m_completions;
 };
 
 } // namespace expression_calculator

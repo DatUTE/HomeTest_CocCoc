@@ -51,11 +51,11 @@ private:
      */
     void workerLoop();
 
-    mutable std::mutex mutex_;
-    std::condition_variable cv_;
-    std::queue<std::function<void()>> jobs_;
-    std::vector<std::thread> workers_;
-    bool stopping_ = false;
+    mutable std::mutex m_mutex;
+    std::condition_variable m_cv;
+    std::queue<std::function<void()>> m_jobs;
+    std::vector<std::thread> m_workers;
+    bool m_stopping = false;
 };
 
 } // namespace expression_calculator

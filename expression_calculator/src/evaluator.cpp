@@ -16,12 +16,12 @@ bool isSpace(char c) {
 class Parser {
 public:
     explicit Parser(std::string_view expression)
-        : begin_(expression.data()), current_(expression.data()), end_(expression.data() + expression.size()) {}
+        : m_begin(expression.data()), m_current(expression.data()), m_end(expression.data() + expression.size()) {}
 
     std::int64_t parse() {
         std::int64_t value = parseExpression();
         skipSpaces();
-        if (current_ != end_) {
+        if (m_current != m_end) {
             throw EvaluationError("unexpected character at position " + std::to_string(position()));
         }
         return value;
@@ -32,11 +32,11 @@ private:
         std::int64_t value = parseTerm();
         while (true) {
             skipSpaces();
-            if (current_ != end_ && *current_ == '+') {
-                ++current_;
+            if (m_current != m_end && *m_current == '+') {
+                ++m_current;
                 value = checkedAdd(value, parseTerm());
-            } else if (current_ != end_ && *current_ == '-') {
-                ++current_;
+            } else if (m_current != m_end && *m_current == '-') {
+                ++m_current;
                 value = checkedSub(value, parseTerm());
             } else {
                 return value;
@@ -48,11 +48,11 @@ private:
         std::int64_t value = parseFactor();
         while (true) {
             skipSpaces();
-            if (current_ != end_ && *current_ == '*') {
-                ++current_;
+            if (m_current != m_end && *m_current == '*') {
+                ++m_current;
                 value = checkedMul(value, parseFactor());
-            } else if (current_ != end_ && *current_ == '/') {
-                ++current_;
+            } else if (m_current != m_end && *m_current == '/') {
+                ++m_current;
                 std::int64_t rhs = parseFactor();
                 if (rhs == 0) {
                     throw EvaluationError("division by zero");
@@ -69,22 +69,22 @@ private:
 
     std::int64_t parseFactor() {
         skipSpaces();
-        if (current_ != end_ && *current_ == '+') {
-            ++current_;
+        if (m_current != m_end && *m_current == '+') {
+            ++m_current;
             return parseFactor();
         }
-        if (current_ != end_ && *current_ == '-') {
-            ++current_;
+        if (m_current != m_end && *m_current == '-') {
+            ++m_current;
             return checkedNegate(parseFactor());
         }
-        if (current_ != end_ && *current_ == '(') {
-            ++current_;
+        if (m_current != m_end && *m_current == '(') {
+            ++m_current;
             std::int64_t value = parseExpression();
             skipSpaces();
-            if (current_ == end_ || *current_ != ')') {
+            if (m_current == m_end || *m_current != ')') {
                 throw EvaluationError("missing closing parenthesis");
             }
-            ++current_;
+            ++m_current;
             return value;
         }
         return parseNumber();
@@ -92,30 +92,30 @@ private:
 
     std::int64_t parseNumber() {
         skipSpaces();
-        if (current_ == end_ || !isDigit(*current_)) {
+        if (m_current == m_end || !isDigit(*m_current)) {
             throw EvaluationError("expected number at position " + std::to_string(position()));
         }
 
         std::int64_t value = 0;
-        while (current_ != end_ && isDigit(*current_)) {
-            int digit = *current_ - '0';
+        while (m_current != m_end && isDigit(*m_current)) {
+            int digit = *m_current - '0';
             if (value > (std::numeric_limits<std::int64_t>::max() - digit) / 10) {
                 throw EvaluationError("integer overflow");
             }
             value = value * 10 + digit;
-            ++current_;
+            ++m_current;
         }
         return value;
     }
 
     void skipSpaces() {
-        while (current_ != end_ && isSpace(*current_)) {
-            ++current_;
+        while (m_current != m_end && isSpace(*m_current)) {
+            ++m_current;
         }
     }
 
     size_t position() const {
-        return static_cast<size_t>(current_ - begin_);
+        return static_cast<size_t>(m_current - m_begin);
     }
 
     static std::int64_t checkedAdd(std::int64_t lhs, std::int64_t rhs) {
@@ -173,9 +173,9 @@ private:
         return -value;
     }
 
-    const char* begin_;
-    const char* current_;
-    const char* end_;
+    const char* m_begin;
+    const char* m_current;
+    const char* m_end;
 };
 
 } // namespace
