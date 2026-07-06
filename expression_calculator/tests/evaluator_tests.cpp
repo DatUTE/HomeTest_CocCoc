@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <iostream>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 
 using expression_calculator::EvaluationError;
@@ -50,6 +51,19 @@ int main() {
     expectError("9223372036854775808");
     expectError("9223372036854775807+1");
     expectError("abc");
+
+    std::string unaryRun(10000, '-');
+    unaryRun += "5";
+    expectValue(unaryRun, 5);
+
+    std::string oddUnaryRun(10001, '-');
+    oddUnaryRun += "5";
+    expectValue(oddUnaryRun, -5);
+
+    std::string nestedParens(5000, '(');
+    nestedParens += "5";
+    nestedParens.append(5000, ')');
+    expectValue(nestedParens, 5);
 
     std::cout << "all evaluator tests passed\n";
     return 0;

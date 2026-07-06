@@ -1,6 +1,7 @@
 #include "evaluator.h"
 
 #include <limits>
+#include <vector>
 
 namespace expression_calculator {
 namespace {
@@ -19,81 +20,195 @@ public:
         : m_begin(expression.data()), m_current(expression.data()), m_end(expression.data() + expression.size()) {}
 
     std::int64_t parse() {
-        std::int64_t value = parseExpression();
-        skipSpaces();
-        if (m_current != m_end) {
-            throw EvaluationError("unexpected character at position " + std::to_string(position()));
-        }
-        return value;
+        return parseExpression();
     }
 
 private:
+    enum class Operator {
+        Add,
+        Subtract,
+        Multiply,
+        Divide,
+        UnaryPlus,
+        UnaryMinus,
+        OpenParen,
+    };
+
     std::int64_t parseExpression() {
-        std::int64_t value = parseTerm();
-        while (true) {
+        std::vector<std::int64_t> values;
+        std::vector<Operator> operators;
+        bool expectingValue = true;
+
+        while (m_current != m_end) {
             skipSpaces();
-            if (m_current != m_end && *m_current == '+') {
+            if (m_current == m_end) {
+                break;
+            }
+
+            char token = *m_current;
+            if (isDigit(token)) {
+                if (!expectingValue) {
+                    throwUnexpectedCharacter();
+                }
+                values.push_back(parseNumber());
+                applyPrefixOperators(values, operators);
+                expectingValue = false;
+            } else if (token == '(') {
+                if (!expectingValue) {
+                    throwUnexpectedCharacter();
+                }
                 ++m_current;
-                value = checkedAdd(value, parseTerm());
-            } else if (m_current != m_end && *m_current == '-') {
+                operators.push_back(Operator::OpenParen);
+                expectingValue = true;
+            } else if (token == ')') {
+                if (expectingValue) {
+                    throwExpectedNumber();
+                }
+                closeParenthesizedExpression(values, operators);
+                expectingValue = false;
+            } else if (token == '+' || token == '-') {
                 ++m_current;
-                value = checkedSub(value, parseTerm());
+                if (expectingValue) {
+                    pushUnaryOperator(token == '+' ? Operator::UnaryPlus : Operator::UnaryMinus, operators);
+                } else {
+                    pushBinaryOperator(token == '+' ? Operator::Add : Operator::Subtract, values, operators);
+                    expectingValue = true;
+                }
+            } else if (token == '*' || token == '/') {
+                if (expectingValue) {
+                    throwExpectedNumber();
+                }
+                ++m_current;
+                pushBinaryOperator(token == '*' ? Operator::Multiply : Operator::Divide, values, operators);
+                expectingValue = true;
             } else {
-                return value;
+                throwUnexpectedCharacter();
             }
         }
-    }
 
-    std::int64_t parseTerm() {
-        std::int64_t value = parseFactor();
-        while (true) {
-            skipSpaces();
-            if (m_current != m_end && *m_current == '*') {
-                ++m_current;
-                value = checkedMul(value, parseFactor());
-            } else if (m_current != m_end && *m_current == '/') {
-                ++m_current;
-                std::int64_t rhs = parseFactor();
-                if (rhs == 0) {
-                    throw EvaluationError("division by zero");
-                }
-                if (value == std::numeric_limits<std::int64_t>::min() && rhs == -1) {
-                    throw EvaluationError("integer overflow");
-                }
-                value /= rhs;
-            } else {
-                return value;
-            }
+        if (expectingValue) {
+            throwExpectedNumber();
         }
-    }
 
-    std::int64_t parseFactor() {
-        skipSpaces();
-        if (m_current != m_end && *m_current == '+') {
-            ++m_current;
-            return parseFactor();
-        }
-        if (m_current != m_end && *m_current == '-') {
-            ++m_current;
-            return checkedNegate(parseFactor());
-        }
-        if (m_current != m_end && *m_current == '(') {
-            ++m_current;
-            std::int64_t value = parseExpression();
-            skipSpaces();
-            if (m_current == m_end || *m_current != ')') {
+        while (!operators.empty()) {
+            if (operators.back() == Operator::OpenParen) {
                 throw EvaluationError("missing closing parenthesis");
             }
-            ++m_current;
-            return value;
+            applyTopOperator(values, operators);
         }
-        return parseNumber();
+
+        if (values.size() != 1) {
+            throw EvaluationError("malformed expression");
+        }
+        return values.back();
+    }
+
+    void closeParenthesizedExpression(std::vector<std::int64_t>& values, std::vector<Operator>& operators) {
+        size_t closePosition = position();
+        ++m_current;
+
+        while (!operators.empty() && operators.back() != Operator::OpenParen) {
+            applyTopOperator(values, operators);
+        }
+        if (operators.empty()) {
+            throw EvaluationError("unexpected character at position " + std::to_string(closePosition));
+        }
+        operators.pop_back();
+        applyPrefixOperators(values, operators);
+    }
+
+    static void pushBinaryOperator(Operator op, std::vector<std::int64_t>& values, std::vector<Operator>& operators) {
+        while (!operators.empty() && operators.back() != Operator::OpenParen &&
+               precedence(operators.back()) >= precedence(op)) {
+            applyTopOperator(values, operators);
+        }
+        operators.push_back(op);
+    }
+
+    static void pushUnaryOperator(Operator op, std::vector<Operator>& operators) {
+        if (op == Operator::UnaryPlus) {
+            return;
+        }
+        if (!operators.empty() && operators.back() == Operator::UnaryMinus) {
+            operators.pop_back();
+            return;
+        }
+        operators.push_back(Operator::UnaryMinus);
+    }
+
+    static void applyPrefixOperators(std::vector<std::int64_t>& values, std::vector<Operator>& operators) {
+        while (!operators.empty() &&
+               (operators.back() == Operator::UnaryPlus || operators.back() == Operator::UnaryMinus)) {
+            applyTopOperator(values, operators);
+        }
+    }
+
+    static void applyTopOperator(std::vector<std::int64_t>& values, std::vector<Operator>& operators) {
+        Operator op = operators.back();
+        operators.pop_back();
+
+        if (op == Operator::UnaryPlus || op == Operator::UnaryMinus) {
+            if (values.empty()) {
+                throw EvaluationError("malformed expression");
+            }
+            if (op == Operator::UnaryMinus) {
+                values.back() = checkedNegate(values.back());
+            }
+            return;
+        }
+
+        if (values.size() < 2) {
+            throw EvaluationError("malformed expression");
+        }
+        std::int64_t rhs = values.back();
+        values.pop_back();
+        std::int64_t lhs = values.back();
+        values.pop_back();
+
+        switch (op) {
+        case Operator::Add:
+            values.push_back(checkedAdd(lhs, rhs));
+            break;
+        case Operator::Subtract:
+            values.push_back(checkedSub(lhs, rhs));
+            break;
+        case Operator::Multiply:
+            values.push_back(checkedMul(lhs, rhs));
+            break;
+        case Operator::Divide:
+            if (rhs == 0) {
+                throw EvaluationError("division by zero");
+            }
+            if (lhs == std::numeric_limits<std::int64_t>::min() && rhs == -1) {
+                throw EvaluationError("integer overflow");
+            }
+            values.push_back(lhs / rhs);
+            break;
+        default:
+            throw EvaluationError("malformed expression");
+        }
+    }
+
+    static int precedence(Operator op) {
+        switch (op) {
+        case Operator::UnaryPlus:
+        case Operator::UnaryMinus:
+            return 3;
+        case Operator::Multiply:
+        case Operator::Divide:
+            return 2;
+        case Operator::Add:
+        case Operator::Subtract:
+            return 1;
+        case Operator::OpenParen:
+            return 0;
+        }
+        return 0;
     }
 
     std::int64_t parseNumber() {
-        skipSpaces();
         if (m_current == m_end || !isDigit(*m_current)) {
-            throw EvaluationError("expected number at position " + std::to_string(position()));
+            throwExpectedNumber();
         }
 
         std::int64_t value = 0;
@@ -116,6 +231,14 @@ private:
 
     size_t position() const {
         return static_cast<size_t>(m_current - m_begin);
+    }
+
+    [[noreturn]] void throwExpectedNumber() const {
+        throw EvaluationError("expected number at position " + std::to_string(position()));
+    }
+
+    [[noreturn]] void throwUnexpectedCharacter() const {
+        throw EvaluationError("unexpected character at position " + std::to_string(position()));
     }
 
     static std::int64_t checkedAdd(std::int64_t lhs, std::int64_t rhs) {
