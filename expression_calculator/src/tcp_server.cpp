@@ -1,6 +1,6 @@
-#include "expression_calculator/tcp_server.h"
+#include "tcp_server.h"
 
-#include "expression_calculator/evaluator.h"
+#include "evaluator.h"
 
 #include <arpa/inet.h>
 #include <cerrno>
