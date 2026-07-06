@@ -1,6 +1,7 @@
 #include "thread_pool.h"
 
 #include <algorithm>
+#include <iostream>
 #include <stdexcept>
 
 namespace expression_calculator {
@@ -54,10 +55,12 @@ void ThreadPool::workerLoop() {
             job = std::move(m_jobs.front());
             m_jobs.pop();
         }
-        try {   
+        try {
             job();
-        } catch (const std::exception& e) {
-            std::cerr << "thread pool worker error: " << e.what() << std::endl;
+        } catch (const std::exception& ex) {
+            std::cerr << "worker job threw: " << ex.what() << "\n";
+        } catch (...) {
+            std::cerr << "worker job threw a non-standard exception\n";
         }
     }
 }

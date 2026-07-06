@@ -49,12 +49,14 @@ def main() -> int:
     )
     parser.add_argument("--chunk-size", type=int, default=1024 * 1024, help="send chunk size")
     parser.add_argument("--timeout", type=float, default=600.0, help="socket timeout in seconds")
+    parser.add_argument("--preconnect", action="store_true", help="exclude TCP connection setup from total_sec")
     args = parser.parse_args()
 
-    start = time.perf_counter()
+    connect_start = time.perf_counter()
     with socket.create_connection((args.host, args.port), timeout=args.timeout) as sock:
         sock.settimeout(args.timeout)
         connected_at = time.perf_counter()
+        start = connected_at if args.preconnect else connect_start
         send_large_expression(sock, args.bytes, args.chunk_size)
         sent_at = time.perf_counter()
         response = b""
@@ -65,6 +67,7 @@ def main() -> int:
             response += chunk
         finished_at = time.perf_counter()
 
+    connect_seconds = connected_at - connect_start
     send_seconds = sent_at - connected_at
     total_seconds = finished_at - start
     response_text = response.decode("utf-8", errors="replace").rstrip("\n")
@@ -72,7 +75,7 @@ def main() -> int:
 
     print(
         f"bytes={args.bytes} mib={mib:.2f} response={response_text!r} "
-        f"send_sec={send_seconds:.3f} total_sec={total_seconds:.3f} "
+        f"connect_sec={connect_seconds:.3f} send_sec={send_seconds:.3f} total_sec={total_seconds:.3f} "
         f"send_mib_per_sec={mib / send_seconds:.2f} total_mib_per_sec={mib / total_seconds:.2f}"
     )
     return 0 if response_text == "1" else 1

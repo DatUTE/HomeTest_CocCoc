@@ -37,8 +37,18 @@ def response_matches(response: str, expected: str | None, expected_prefix: str |
 
 
 async def run_small_client(client_id: int, args, cases):
-    case = cases[client_id % len(cases)]
     reader, writer = await asyncio.open_connection(args.host, args.port)
+    return await run_connected_small_client(reader, writer, client_id, cases, args)
+
+
+async def run_connected_small_client(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    client_id: int,
+    cases,
+    args,
+):
+    case = cases[client_id % len(cases)]
     try:
         writer.write((case["expression"] + "\n").encode("utf-8"))
         await writer.drain()
@@ -82,6 +92,15 @@ def args_write_buffer_limit(chunk_size: int) -> int:
 
 async def run_large_client(client_id: int, args):
     reader, writer = await asyncio.open_connection(args.host, args.port)
+    return await run_connected_large_client(reader, writer, client_id, args)
+
+
+async def run_connected_large_client(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    client_id: int,
+    args,
+):
     start = time.perf_counter()
     try:
         await write_large_expression(writer, args.large_bytes, args.chunk_size)
@@ -104,13 +123,35 @@ async def run_large_client(client_id: int, args):
 
 async def run(args):
     small_cases = load_small_cases(Path(args.small_input))
-    tasks = []
-    for i in range(args.small_clients):
-        tasks.append(asyncio.create_task(run_small_client(i, args, small_cases)))
-    for i in range(args.large_clients):
-        tasks.append(asyncio.create_task(run_large_client(i, args)))
+    preconnected = []
+    if args.preconnect:
+        connect_start = time.perf_counter()
+        preconnected = await asyncio.gather(
+            *[
+                asyncio.open_connection(args.host, args.port)
+                for _ in range(args.small_clients + args.large_clients)
+            ]
+        )
+        connect_elapsed = time.perf_counter() - connect_start
+        print(
+            f"preconnected={args.small_clients + args.large_clients} "
+            f"connect_elapsed_sec={connect_elapsed:.3f}"
+        )
 
     start = time.perf_counter()
+    tasks = []
+    if args.preconnect:
+        for i in range(args.small_clients):
+            reader, writer = preconnected[i]
+            tasks.append(asyncio.create_task(run_connected_small_client(reader, writer, i, small_cases, args)))
+        for i in range(args.large_clients):
+            reader, writer = preconnected[args.small_clients + i]
+            tasks.append(asyncio.create_task(run_connected_large_client(reader, writer, i, args)))
+    else:
+        for i in range(args.small_clients):
+            tasks.append(asyncio.create_task(run_small_client(i, args, small_cases)))
+        for i in range(args.large_clients):
+            tasks.append(asyncio.create_task(run_large_client(i, args)))
     results = await asyncio.gather(*tasks, return_exceptions=True)
     elapsed = time.perf_counter() - start
 
@@ -196,6 +237,7 @@ def parse_args():
     )
     parser.add_argument("--chunk-size", type=int, default=1024 * 1024, help="large request chunk size")
     parser.add_argument("--timeout", type=float, default=900.0, help="per-client timeout")
+    parser.add_argument("--preconnect", action="store_true", help="exclude TCP connection setup from elapsed_sec")
     return parser.parse_args()
 
 
