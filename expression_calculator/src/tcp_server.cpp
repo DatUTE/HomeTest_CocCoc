@@ -24,6 +24,7 @@ constexpr size_t kReadBufferSize = 1024 * 1024;
 
 // Pre-size client map for high-concurrency tests.
 constexpr size_t kExpectedConcurrentClients = 16 * 1024;
+constexpr size_t kMaxPendingExpressionsPerClient = 1024;
 
 void closeFd(int& fd) {
     if (fd >= 0) {
@@ -182,41 +183,15 @@ void TcpServer::handleClientReadable(int fd) {
     ClientState& client = it->second;
 
     char buffer[kReadBufferSize];
-    while (true) {
+    while (shouldReadFromClient(client)) {
         ssize_t n = ::read(fd, buffer, sizeof(buffer));
         if (n > 0) {
             client.input.append(buffer, static_cast<size_t>(n));
+            processBufferedInput(client);
 
-            while (true) {
-                size_t newline = client.input.find('\n', client.scanPos);
-                if (newline == std::string::npos) {
-                    client.scanPos = client.input.size();
-                    break;
-                }
-
-                if (newline > m_maxExpressionBytes) {
-                    client.output += "ERROR: expression is too large\n";
-                    client.closeAfterWrite = true;
-                    client.input.clear();
-                    updateClientEvents(client);
-                    return;
-                }
-
-                std::string expression;
-                if (newline + 1 == client.input.size()) {
-                    expression = std::move(client.input);
-                    expression.resize(newline);
-                    client.input.clear();
-                } else {
-                    expression = client.input.substr(0, newline);
-                    client.input.erase(0, newline + 1);
-                }
-                if (!expression.empty() && expression.back() == '\r') {
-                    expression.pop_back();
-                }
-                client.scanPos = 0;
-                client.pendingExpressions.push_back(std::move(expression));
-                submitNextExpression(client);
+            if (client.closeAfterWrite || isClientBackpressured(client)) {
+                updateClientEvents(client);
+                return;
             }
 
             if (client.input.size() > m_maxExpressionBytes) {
@@ -240,6 +215,52 @@ void TcpServer::handleClientReadable(int fd) {
             return;
         }
     }
+    updateClientEvents(client);
+}
+
+void TcpServer::processBufferedInput(ClientState& client) {
+    while (!isClientBackpressured(client)) {
+        size_t newline = client.input.find('\n', client.scanPos);
+        if (newline == std::string::npos) {
+            client.scanPos = client.input.size();
+            break;
+        }
+
+        if (newline > m_maxExpressionBytes) {
+            client.output += "ERROR: expression is too large\n";
+            client.closeAfterWrite = true;
+            client.input.clear();
+            client.scanPos = 0;
+            updateClientEvents(client);
+            return;
+        }
+
+        std::string expression;
+        if (newline + 1 == client.input.size()) {
+            expression = std::move(client.input);
+            expression.resize(newline);
+            client.input.clear();
+        } else {
+            expression = client.input.substr(0, newline);
+            client.input.erase(0, newline + 1);
+        }
+        if (!expression.empty() && expression.back() == '\r') {
+            expression.pop_back();
+        }
+        client.scanPos = 0;
+        client.pendingExpressionBytes += expression.size();
+        client.pendingExpressions.push_back(std::move(expression));
+        submitNextExpression(client);
+    }
+}
+
+bool TcpServer::isClientBackpressured(const ClientState& client) const {
+    return client.pendingExpressions.size() >= kMaxPendingExpressionsPerClient ||
+           client.pendingExpressionBytes >= m_maxExpressionBytes;
+}
+
+bool TcpServer::shouldReadFromClient(const ClientState& client) const {
+    return !client.closeAfterWrite && !isClientBackpressured(client);
 }
 
 void TcpServer::handleClientWritable(int fd) {
@@ -298,6 +319,7 @@ void TcpServer::handleCompletions() {
         client.processing = false;
         client.output += std::move(completion.response);
         submitNextExpression(client);
+        processBufferedInput(client);
         updateClientEvents(client);
     }
 }
@@ -310,8 +332,10 @@ void TcpServer::submitNextExpression(ClientState& client) {
     client.processing = true;
     int fd = client.fd;
     std::uint64_t clientId = client.id;
+    size_t expressionBytes = client.pendingExpressions.front().size();
     std::string expression = std::move(client.pendingExpressions.front());
     client.pendingExpressions.pop_front();
+    client.pendingExpressionBytes -= expressionBytes;
 
     m_workers.submit([this, fd, clientId, expression = std::move(expression)]() mutable {
         queueCompletion({fd, clientId, makeResponse(expression)});
@@ -344,7 +368,10 @@ void TcpServer::queueCompletion(Completion completion) {
 
 void TcpServer::updateClientEvents(const ClientState& client) {
     epoll_event event{};
-    event.events = EPOLLIN | EPOLLRDHUP;
+    event.events = EPOLLRDHUP;
+    if (shouldReadFromClient(client)) {
+        event.events |= EPOLLIN;
+    }
     if (!client.output.empty()) {
         event.events |= EPOLLOUT;
     }

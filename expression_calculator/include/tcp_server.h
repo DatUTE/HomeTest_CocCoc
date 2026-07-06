@@ -54,6 +54,7 @@ private:
         size_t scanPos = 0;
         std::string output;
         std::deque<std::string> pendingExpressions;
+        size_t pendingExpressionBytes = 0;
         bool processing = false;
         bool closeAfterWrite = false;
     };
@@ -84,6 +85,24 @@ private:
      * @param fd Client socket file descriptor.
      */
     void handleClientReadable(int fd);
+
+    /**
+     * @brief Extracts complete expressions already buffered for a client.
+     * @param client Client state whose input buffer should be processed.
+     */
+    void processBufferedInput(ClientState& client);
+
+    /**
+     * @brief Returns whether reading more input for a client should be paused.
+     * @param client Client state to inspect.
+     */
+    bool isClientBackpressured(const ClientState& client) const;
+
+    /**
+     * @brief Returns whether epoll should watch a client for more input.
+     * @param client Client state to inspect.
+     */
+    bool shouldReadFromClient(const ClientState& client) const;
 
     /**
      * @brief Writes queued response bytes to a client socket.
